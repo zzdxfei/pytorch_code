@@ -19,11 +19,13 @@ bool AbsGradientFunctor<CPUContext>::Forward(
       X_dims.cbegin(), X_dims.cend(), 1, std::multiplies<int>());
   ConstEigenVectorArrayMap<T> dY_arr(dY, size);
   ConstEigenVectorArrayMap<T> X_arr(X, size);
+  // 还可以这样写，高端!
   EigenVectorMap<T>(dX, size) =
       (X_arr == T(0)).select(T(0), (X_arr > T(0)).select(dY_arr, -dY_arr));
   return true;
 }
 
+// 操作注册
 REGISTER_CPU_OPERATOR(
     Abs,
     UnaryElementwiseOp<TensorTypes<float>, CPUContext, AbsFunctor<CPUContext>>);

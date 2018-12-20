@@ -11,6 +11,7 @@ namespace {
 template <typename T>
 using BlockReduce = cub::BlockReduce<T, CAFFE_CUDA_NUM_THREADS>;
 
+// 一个块计算一个scale[i]和bias[i]
 template <typename T, StorageOrder kOrder>
 __global__ void AffineChannelScaleBiasBackwardCUDAKernel(
     const int N,
@@ -51,19 +52,25 @@ __global__ void AffineChannelScaleBiasBackwardCUDAKernel(
 
 } // namespace
 
+// 是否学习决定了是否更新scale和bias
 template <>
 bool AffineChannelGradientOp<float, CUDAContext>::RunOnDeviceWithOrderNCHW() {
   const auto& dY = Input(0);
   const auto& scale = is_learnable_ ? Input(2) : Input(1);
   auto* dX = Output(0);
   dX->ResizeLike(dY);
+
   const int N = dY.dim32(0);
   const int C = dY.dim32(1);
   const int HxW = dY.size() / (N * C);
+
   const float* dY_data = dY.data<float>();
   const float* scale_data = scale.data<float>();
+
   const std::array<int, 3> X_dims = {N, C, HxW};
   const std::array<int, 3> scale_dims = {1, C, 1};
+
+  // 计算dX，相乘
   math::Mul<float, CUDAContext>(
       3,
       X_dims.data(),
@@ -73,13 +80,17 @@ bool AffineChannelGradientOp<float, CUDAContext>::RunOnDeviceWithOrderNCHW() {
       scale_data,
       dX->template mutable_data<float>(),
       &context_);
+
   if (is_learnable_) {
     const auto& X = Input(1);
     const float* X_data = X.data<float>();
+
+    // 参数导数
     auto* dscale = Output(1);
     auto* dbias = Output(2);
     dscale->ResizeLike(scale);
     dbias->ResizeLike(scale);
+
     const int outer_size = N * HxW;
     AffineChannelScaleBiasBackwardCUDAKernel<float, StorageOrder::NCHW>
         <<<std::min(outer_size, CAFFE_MAXIMUM_NUM_BLOCKS),
@@ -103,6 +114,7 @@ bool AffineChannelGradientOp<float, CUDAContext>::RunOnDeviceWithOrderNHWC() {
   const auto& scale = is_learnable_ ? Input(2) : Input(1);
   auto* dX = Output(0);
   dX->ResizeLike(dY);
+
   const int ndim = dY.ndim();
   const int C = dY.dim32(ndim - 1);
   const int rows = dY.size() / C;
@@ -141,6 +153,7 @@ bool AffineChannelGradientOp<float, CUDAContext>::RunOnDeviceWithOrderNHWC() {
   return true;
 }
 
+// 注册GPU操作
 REGISTER_CUDA_OPERATOR(AffineChannel, AffineChannelOp<float, CUDAContext>);
 REGISTER_CUDA_OPERATOR(
     AffineChannelGradient,

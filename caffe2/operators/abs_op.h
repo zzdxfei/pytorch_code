@@ -8,6 +8,8 @@
 
 namespace caffe2 {
 
+// 定义了2个函数对象
+
 template <class Context>
 struct AbsFunctor {
   template <typename T>

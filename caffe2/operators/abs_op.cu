@@ -44,6 +44,7 @@ bool AbsGradientFunctor<CUDAContext>::Forward(
   return true;
 }
 
+// 注册GPU操作
 REGISTER_CUDA_OPERATOR(
     Abs,
     UnaryElementwiseOp<

@@ -16,16 +16,24 @@ void AffineChannelScaleBiasBackwardNCHW(
     const T* X,
     T* dscale,
     T* dbias) {
+  // 导数
   const T* dY_ptr = dY;
+  // 输入
   const T* X_ptr = X;
   const int stride = C * HxW;
+
   EigenVectorArrayMap<T> dscale_arr(dscale, C);
   EigenVectorArrayMap<T> dbias_arr(dbias, C);
   dscale_arr.setZero();
   dbias_arr.setZero();
+
   for (int i = 0; i < N; ++i) {
+    // 第一张图片的数据
+    // Eigen默认是按照列优先存储的
     ConstEigenArrayMap<T> dY_arr(dY_ptr, HxW, C);
     ConstEigenArrayMap<T> X_arr(X_ptr, HxW, C);
+
+    // 去参数的求导
     dscale_arr += (dY_arr * X_arr).colwise().sum();
     dbias_arr += dY_arr.colwise().sum();
     dY_ptr += stride;
@@ -50,19 +58,31 @@ void AffineChannelScaleBiasBackwardNHWC(
 
 } // namespace
 
+// 反向传播的实现
 template <>
 bool AffineChannelGradientOp<float, CPUContext>::RunOnDeviceWithOrderNCHW() {
+  // 输入
   const auto& dY = Input(0);
+  // 如果该层的参数学习，则Input(1)为前向传播的输入
   const auto& scale = is_learnable_ ? Input(2) : Input(1);
+
+  // 输出
   auto* dX = Output(0);
+
+  // 输出分配内存
   dX->ResizeLike(dY);
+
   const int N = dY.dim32(0);
   const int C = dY.dim32(1);
   const int HxW = dY.numel() / (N * C);
+
   const float* dY_data = dY.data<float>();
   const float* scale_data = scale.data<float>();
+
   const std::array<int, 3> X_dims = {N, C, HxW};
   const std::array<int, 3> scale_dims = {1, C, 1};
+
+  // 反向传播计算
   math::Mul<float, CPUContext>(
       3,
       X_dims.data(),
@@ -72,13 +92,19 @@ bool AffineChannelGradientOp<float, CPUContext>::RunOnDeviceWithOrderNCHW() {
       scale_data,
       dX->template mutable_data<float>(),
       &context_);
+
   if (is_learnable_) {
+    // 前向传播的输入
     const auto& X = Input(1);
     const float* X_data = X.data<float>();
+
+    // 反向传播的输出
     auto* dscale = Output(1);
     auto* dbias = Output(2);
+
     dscale->ResizeLike(scale);
     dbias->ResizeLike(scale);
+
     AffineChannelScaleBiasBackwardNCHW<float>(
         N,
         C,
@@ -131,11 +157,14 @@ bool AffineChannelGradientOp<float, CPUContext>::RunOnDeviceWithOrderNHWC() {
   return true;
 }
 
+// 前向和反向传播op注册
 REGISTER_CPU_OPERATOR(AffineChannel, AffineChannelOp<float, CPUContext>);
 REGISTER_CPU_OPERATOR(
     AffineChannelGradient,
     AffineChannelGradientOp<float, CPUContext>);
 
+// TODO(zzdxfei) ???
+// 前向传播
 OPERATOR_SCHEMA(AffineChannel)
     .NumInputs(3)
     .NumOutputs(1)
@@ -157,6 +186,8 @@ for replacing spatial batch norm with its equivalent fixed transformation.
         "transformation for the c-th channel of the input.")
     .Output(0, "Y", "Output with the same order of Input.");
 
+
+// 反向传播
 OPERATOR_SCHEMA(AffineChannelGradient)
     .NumInputs({2, 3})
     .NumOutputs({1, 3})
