@@ -12,15 +12,20 @@
 
 namespace caffe2 {
 
+// 前向传播代码
 template <typename T, class Context>
 bool DeformConvOp<T, Context>::RunOnDeviceWithOrderNCHW() {
   const Tensor& X = Input(INPUT);
   const Tensor& offset = Input(OFFSET);
   auto& filter = Input(FILTER);
   Tensor* Y = Output(0);
+
   const int N = X.dim32(0), C = X.dim32(1);
   CAFFE_ENFORCE_EQ(X.dim(), filter.ndim());
+
+  // output的channels
   const int M = filter.dim32(0);
+  // 输入的通道数 = filter.dim32(1) * 组数
   CAFFE_ENFORCE(
       C == filter.dim32(1) * group_,
       "Convolution op: input channels does not match: # of input channels ",
@@ -29,32 +34,39 @@ bool DeformConvOp<T, Context>::RunOnDeviceWithOrderNCHW() {
       filter.dim32(1),
       "*",
       group_);
+  // 输出的通道数能被group整除
   CAFFE_ENFORCE(
       M % group_ == 0,
       "The number of output channels is not divisible by group.");
+  // 仅支持kernel为(kh, kw)的形式
   CAFFE_ENFORCE(
       kernel_.size() == 2,
       "Deformable convolution only supports 2d kernel, has ",
       kernel_.size(),
       "d kernel.");
+  // offset的轴必须为4维
   CAFFE_ENFORCE(
       offset.dim() == 4,
       "Deformable convolution only supports 4d offset, has ",
       offset.dim(),
       "d offset.");
+  // offset的第0维为batch size
   CAFFE_ENFORCE_EQ(offset.dim32(0), N);
+  // 输入的通道数必须被可变卷积组数整除
   CAFFE_ENFORCE(
       C % deformable_group_ == 0,
       "The number of input channels ",
       C,
       " is not divisible by deformable group ",
       deformable_group_);
+  // 输出的通道数必须被可变卷积组数整除
   CAFFE_ENFORCE(
       M % deformable_group_ == 0,
       "The number of output channels ",
       M,
       " is not divisible by deformable group ",
       deformable_group_);
+  // offset的通道数必须如下
   CAFFE_ENFORCE(
       offset.dim32(1) == 2 * kernel_h() * kernel_w() * deformable_group_,
       "Deformable convolution: offset 1st dimension must equal "
@@ -65,6 +77,7 @@ bool DeformConvOp<T, Context>::RunOnDeviceWithOrderNCHW() {
       " * ",
       deformable_group_);
 
+  // offset的高和宽必须和输出一致
   CAFFE_ENFORCE_EQ(
       offset.dim32(2),
       (X.dim32(2) + pad_t() + pad_b() - (dilation_h() * (kernel_h() - 1) + 1)) /
@@ -76,16 +89,21 @@ bool DeformConvOp<T, Context>::RunOnDeviceWithOrderNCHW() {
               stride_w() +
           1);
 
+  // kernel_h * kernel_w
   int kernel_dims_size = 1;
   for (int i = 0; i < kernel_.size(); ++i) {
     CAFFE_ENFORCE(filter.dim32(i + 2) == kernel_[i]);
     kernel_dims_size *= kernel_[i];
   }
 
+  // 计算Y的形状
   ConvPoolOpBase<Context>::SetOutputSize(X, Y, filter.dim32(0));
 
+  // (h, w)
   const vector<int> input_dims = GetDims(X);
+  // (h, w)
   const vector<int> output_dims = GetDims(*Y);
+  // 返回图片的尺寸 h x w
   const int input_image_size = this->GetDimsSize(X);
   const int output_image_size = this->GetDimsSize(*Y);
 
@@ -93,14 +111,18 @@ bool DeformConvOp<T, Context>::RunOnDeviceWithOrderNCHW() {
   img_shape.assign(X.sizes().begin() + 1, X.sizes().end());
 
   vector<int> buffer_shape;
+  // (C * kernel_h * kernel_w, output_h, output_w)
   buffer_shape.push_back(C / group_ * kernel_dims_size);
   buffer_shape.insert(
       buffer_shape.end(), output_dims.begin(), output_dims.end());
 
   // The dimension of each kernel
   const int kernel_dim = C / group_ * kernel_dims_size;
+
   // The offset corresponding to a single input image, and a single output
   // image.
+
+  // offset为batch间的间隔
   const int input_offset = C / group_ * input_image_size;
   const int output_offset = M / group_ * output_image_size;
   const int offset_offset = offset.numel() / offset.dim32(0);
@@ -119,6 +141,7 @@ bool DeformConvOp<T, Context>::RunOnDeviceWithOrderNCHW() {
       // If the helper bias multiplier is not image size, reshape and fill it
       // with
       // one.
+      // 方便后面的计算
       bias_multiplier_.Resize(vector<int64_t>(1, output_image_size));
       math::Set<T, Context>(
           output_image_size,
@@ -127,6 +150,8 @@ bool DeformConvOp<T, Context>::RunOnDeviceWithOrderNCHW() {
           &context_);
     }
   }
+
+
   T* Ydata = Y->template mutable_data<T>();
   const T* bias_data = nullptr;
   if (InputSize() == 4) {
@@ -136,9 +161,11 @@ bool DeformConvOp<T, Context>::RunOnDeviceWithOrderNCHW() {
   auto f = [&](Tensor* col_buffer) {
     col_buffer->Resize(buffer_shape);
     T* col_buffer_data = col_buffer->template mutable_data<T>();
+
     // Im2col, followed by gemm.
     for (int image_id = 0; image_id < N; ++image_id) {
       for (int group_id = 0; group_id < group_; ++group_id) {
+        // 使用offset_data对X进行矩阵化
         DeformableIm2col(
             Xdata + group_id * input_offset,
             offset_data,
@@ -146,6 +173,7 @@ bool DeformConvOp<T, Context>::RunOnDeviceWithOrderNCHW() {
             col_buffer->sizes(),
             col_buffer_data);
         // Weight term
+        // 矩阵相乘 filter * X
         math::Gemm<T, Context>(
             CblasNoTrans,
             CblasNoTrans,
@@ -159,6 +187,8 @@ bool DeformConvOp<T, Context>::RunOnDeviceWithOrderNCHW() {
             Ydata + group_id * output_offset,
             &context_);
       }
+
+      // 添加bias
       if (bias_data) {
         math::Gemm<T, Context>(
             CblasNoTrans,
