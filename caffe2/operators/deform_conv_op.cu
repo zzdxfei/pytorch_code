@@ -78,8 +78,11 @@ __device__ DType deformable_im2col_bilinear(
     const int width,
     DType h,
     DType w) {
+  // 左下角坐标
   int h_low = floor(h);
   int w_low = floor(w);
+
+  // 计算右上角坐标
   int h_high;
   int w_high;
   if (h_low >= height - 1) {
@@ -88,7 +91,6 @@ __device__ DType deformable_im2col_bilinear(
   } else {
     h_high = h_low + 1;
   }
-
   if (w_low >= width - 1) {
     w_high = w_low = width - 1;
     w = (DType)w_low;
@@ -96,14 +98,18 @@ __device__ DType deformable_im2col_bilinear(
     w_high = w_low + 1;
   }
 
+  // 计算权重
   DType lh = h - h_low;
   DType lw = w - w_low;
   DType hh = 1 - lh, hw = 1 - lw;
 
+  // 获取2个顶点的值
   DType v1 = bottom_data[h_low * data_width + w_low];
   DType v2 = bottom_data[h_low * data_width + w_high];
   DType v3 = bottom_data[h_high * data_width + w_low];
   DType v4 = bottom_data[h_high * data_width + w_high];
+
+  // TODO(zzdxfei)
   DType w1 = hh * hw, w2 = hh * lw, w3 = lh * hw, w4 = lh * lw;
 
   DType val = (w1 * v1 + w2 * v2 + w3 * v3 + w4 * v4);
@@ -244,44 +250,67 @@ __global__ void deformable_im2col_gpu_kernel(
     DType* data_col) {
   CUDA_1D_KERNEL_LOOP(index, n) {
     // index index of output matrix
-    const int w_col = index % width_col;
-    const int h_col = (index / width_col) % height_col;
-    const int c_im = (index / width_col) / height_col;
-    const int c_col = c_im * kernel_h * kernel_w;
+    // 以转变矩阵为对象，每个线程处理kernel_h x kernel_w个位置
+    const int w_col = index % width_col;  // 宽索引
+    const int h_col = (index / width_col) % height_col;  // 高索引
+    const int c_im = (index / width_col) / height_col;  // 通道索引
+    const int c_col = c_im * kernel_h * kernel_w;  // 要处理的开始位置
 
     // compute deformable group index
+    // 可变组序号
     const int deformable_group_index = c_im / channel_per_deformable_group;
 
+    // 在输入图像中，卷积的左上角位置索引
     const int h_in = h_col * stride_h - pad_h;
     const int w_in = w_col * stride_w - pad_w;
+
+    // 转变矩阵的起始位置
     DType* data_col_ptr =
         data_col + (c_col * height_col + h_col) * width_col + w_col;
+
+    // 卷积左上角对应的输入图片位置
     const DType* data_im_ptr = data_im + (c_im * height + h_in) * width + w_in;
+
+    // offset的坐标位置，如果这有1组，那么这里为起始位置
     const DType* data_offset_ptr = data_offset +
         deformable_group_index * 2 * kernel_h * kernel_w * height_col *
             width_col;
 
+    // 对卷积核
     for (int i = 0; i < kernel_h; ++i) {
       for (int j = 0; j < kernel_w; ++j) {
+
+        // 获得offset的索引
         const int data_offset_h_ptr =
             ((2 * (i * kernel_w + j)) * height_col + h_col) * width_col + w_col;
         const int data_offset_w_ptr =
             ((2 * (i * kernel_w + j) + 1) * height_col + h_col) * width_col +
             w_col;
+
+        // 获得offset的值
         const DType offset_h = data_offset_ptr[data_offset_h_ptr];
         const DType offset_w = data_offset_ptr[data_offset_w_ptr];
+
         DType val = static_cast<DType>(0);
+
+        // 获得在输入图片中的位置
         const DType h_im = h_in + i * dilation_h + offset_h;
         const DType w_im = w_in + j * dilation_w + offset_w;
+
         if (h_im >= 0 && w_im >= 0 && h_im < height && w_im < width) {
+          // 在图片中，进行双线性插值
           const DType map_h = i * dilation_h + offset_h;
           const DType map_w = j * dilation_w + offset_w;
+
+          // 坐标原点变换
           const int cur_height = height - h_in;
           const int cur_width = width - w_in;
+
           val = deformable_im2col_bilinear(
               data_im_ptr, width, cur_height, cur_width, map_h, map_w);
         }
         *data_col_ptr = val;
+        // 定位到下一个要处理的位置
         data_col_ptr += height_col * width_col;
       }
     }
@@ -304,16 +333,23 @@ template <typename DType, typename Context>
 void DeformConvOpBase<DType, Context>::DeformableIm2col(
     const DType* data_im,
     const DType* data_offset,
-    at::IntList im_shape,
-    at::IntList col_shape,
+    at::IntList im_shape,  // X.sizes()
+    at::IntList col_shape,  // col_buffer->sizes()
     DType* data_col) {
+  // pad两端必须相同
   CHECK_LT(2, CAFFE_CUDA_NUM_THREADS);
   CAFFE_ENFORCE_EQ(pad_t(), pad_b());
   CAFFE_ENFORCE_EQ(pad_l(), pad_r());
+
   const int pad_h = pad_t();
   const int pad_w = pad_l();
+
+  // C分成deformable_group_组
   index_t channel_per_deformable_group = im_shape[1] / deformable_group_;
+
+  // (C * output_h * output_w)
   index_t num_kernels = im_shape[1] * size_from_dim_(1, col_shape);
+
   deformable_im2col_gpu_kernel<DType>
       <<<CAFFE_GET_BLOCKS(num_kernels),
          CAFFE_CUDA_NUM_THREADS,
