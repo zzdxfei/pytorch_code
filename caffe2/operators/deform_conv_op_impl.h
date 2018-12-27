@@ -219,24 +219,37 @@ bool DeformConvOp<T, Context>::RunOnDeviceWithOrderNCHW() {
 
 template <typename T, class Context>
 bool DeformConvGradientOp<T, Context>::RunOnDeviceWithOrderNCHW() {
+  // 已知项
   auto& X = Input(INPUT);
   auto& offset = Input(OFFSET);
   auto& filter = Input(FILTER);
+
   auto& dY = Input(OUTPUT_GRAD);
+
+  // 求这两项
   auto* dfilter = Output(FILTER_GRAD);
   auto* doffset = Output(OFFSET_GRAD);
+
   const int N = X.dim32(0), C = X.dim32(1);
 
+  // (input_h, input_w)
   const vector<int> input_dims = this->GetDims(X);
+  // (input_h x input_w)
   const int input_image_size = this->GetDimsSize(X);
 
+  // (output_h, output_w)
   const vector<int> output_dims = this->GetDims(dY);
   // The output image size is the spatial size of the output.
+  // (output_h x output_w)
   const int output_image_size = this->GetDimsSize(dY);
 
   ConvPoolOpBase<Context>::ComputePads(input_dims);
   CAFFE_ENFORCE_EQ(X.ndim(), filter.ndim());
+
+  // 输出通道个数
   const int M = filter.dim32(0);
+
+  // 检查输入是否合法
   CAFFE_ENFORCE(filter.dim32(1) * group_ == C);
 
   CAFFE_ENFORCE(
@@ -283,6 +296,7 @@ bool DeformConvGradientOp<T, Context>::RunOnDeviceWithOrderNCHW() {
               stride_w() +
           1);
 
+  // 3 x 3
   int kernel_dims_size = 1;
   for (int i = 0; i < kernel_.size(); ++i) {
     CAFFE_ENFORCE(filter.dim32(i + 2) == kernel_[i]);
@@ -290,13 +304,16 @@ bool DeformConvGradientOp<T, Context>::RunOnDeviceWithOrderNCHW() {
   }
 
   CAFFE_ENFORCE(M % group_ == 0);
+  // 导数张量分配空间
   dfilter->ResizeLike(filter);
   doffset->ResizeLike(offset);
 
   // The dimension of each kernel
   const int kernel_dim = C / group_ * kernel_dims_size;
+
   // The offset corresponding to a single input image, and a single output
   // image.
+  // batch中每个图像的长度
   const int input_offset = C / group_ * input_image_size;
   const int output_offset = M / group_ * output_image_size;
   const int offset_offset = offset.size() / offset.dim32(0);
@@ -304,8 +321,11 @@ bool DeformConvGradientOp<T, Context>::RunOnDeviceWithOrderNCHW() {
 
   // The col buffer is stored in CHW order as well - kernel_dim, and the
   // height and width.
+  // (C, input_h, input_w)
   vector<int64_t> img_shape;
   img_shape.assign(X.dims().begin() + 1, X.dims().end());
+
+  // (C x kernel_h x kernel_w, output_h, output_w)
   vector<int64_t> col_buffer_shape;
   col_buffer_shape.push_back(C * kernel_dims_size);
   col_buffer_shape.insert(
@@ -318,6 +338,7 @@ bool DeformConvGradientOp<T, Context>::RunOnDeviceWithOrderNCHW() {
   const T* filter_data = filter.template data<T>();
   const T* offset_data = offset.template data<T>();
   const T* dYdata = dY.template data<T>();
+
   T* col_buffer_data = col_buffer_.template mutable_data<T>();
   T* dfilter_data = dfilter->template mutable_data<T>();
   T* doffset_data = doffset->template mutable_data<T>();
@@ -342,6 +363,7 @@ bool DeformConvGradientOp<T, Context>::RunOnDeviceWithOrderNCHW() {
     math::Set<T, Context>(dbias->size(), 0, dbias_data, &context_);
   }
 
+  // dX分配空间
   T* dXdata = nullptr;
   if (OutputSize() == 4 || (no_bias_ && (OutputSize() == 3))) {
     auto* dX = Output(no_bias_ ? BIAS_OR_INPUT_GRAD : INPUT_GRAD);
@@ -351,7 +373,9 @@ bool DeformConvGradientOp<T, Context>::RunOnDeviceWithOrderNCHW() {
   }
 
   for (int image_id = 0; image_id < N; ++image_id) {
+    // group_id = 0
     for (int group_id = 0; group_id < group_; ++group_id) {
+      // 获得转变矩阵的导数
       math::Gemm<T, Context>(
           CblasTrans,
           CblasNoTrans,
@@ -367,6 +391,7 @@ bool DeformConvGradientOp<T, Context>::RunOnDeviceWithOrderNCHW() {
     }
 
     // Gradient with respect to offsets
+    // 求offset的导数
     DeformableCol2imCoord(
         col_buffer_data,
         Xdata,
@@ -376,6 +401,7 @@ bool DeformConvGradientOp<T, Context>::RunOnDeviceWithOrderNCHW() {
         doffset_data);
 
     // Gradient with respect to input data
+    // 求input的导数
     if (dXdata) {
       DeformableCol2im(
           col_buffer_data, offset_data, X.dims(), col_buffer_shape, dXdata);
@@ -383,9 +409,11 @@ bool DeformConvGradientOp<T, Context>::RunOnDeviceWithOrderNCHW() {
     }
 
     // Gradient with respect to filter
+    // 求filter的导数
+    // 计算转变矩阵
     DeformableIm2col(
         Xdata, offset_data, X.dims(), col_buffer_shape, col_buffer_data);
-
+    // 求filter的导数
     for (int group_id = 0; group_id < group_; ++group_id) {
       math::Gemm<T, Context>(
           CblasNoTrans,
@@ -402,6 +430,7 @@ bool DeformConvGradientOp<T, Context>::RunOnDeviceWithOrderNCHW() {
     }
 
     // Gradient with respect to bias
+    // 计算bias的导数
     if (dbias_data) {
       math::Gemv<T, Context>(
           CblasNoTrans,

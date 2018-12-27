@@ -78,13 +78,14 @@ __device__ DType deformable_im2col_bilinear(
     const int width,
     DType h,
     DType w) {
-  // 左下角坐标
+  // 左上角坐标
   int h_low = floor(h);
   int w_low = floor(w);
 
-  // 计算右上角坐标
+  // 计算右下角坐标
   int h_high;
   int w_high;
+  // 如果超过图像范围，设置为最后一个像素
   if (h_low >= height - 1) {
     h_high = h_low = height - 1;
     h = (DType)h_low;
@@ -104,12 +105,12 @@ __device__ DType deformable_im2col_bilinear(
   DType hh = 1 - lh, hw = 1 - lw;
 
   // 获取2个顶点的值
-  DType v1 = bottom_data[h_low * data_width + w_low];
-  DType v2 = bottom_data[h_low * data_width + w_high];
-  DType v3 = bottom_data[h_high * data_width + w_low];
-  DType v4 = bottom_data[h_high * data_width + w_high];
+  DType v1 = bottom_data[h_low * data_width + w_low];  // (x0, y0)
+  DType v2 = bottom_data[h_low * data_width + w_high];  // (x1, y0)
+  DType v3 = bottom_data[h_high * data_width + w_low];  // (x0, y1)
+  DType v4 = bottom_data[h_high * data_width + w_high];  // (x1, y1)
 
-  // TODO(zzdxfei)
+  // 计算每个点的权重
   DType w1 = hh * hw, w2 = hh * lw, w3 = lh * hw, w4 = lh * lw;
 
   DType val = (w1 * v1 + w2 * v2 + w3 * v3 + w4 * v4);
@@ -132,6 +133,7 @@ __device__ DType get_gradient_weight(
   argmax_h = max(argmax_h, (DType)0.0f);
   argmax_w = max(argmax_w, (DType)0.0f);
 
+  // 计算4个点的坐标
   int argmax_h_low = (int)argmax_h;
   int argmax_w_low = (int)argmax_w;
   int argmax_h_high;
@@ -148,7 +150,10 @@ __device__ DType get_gradient_weight(
   } else {
     argmax_w_high = argmax_w_low + 1;
   }
+
   DType weight = 0;
+
+  // 分4种情况取4个点中的不同点，在forword中的乘积形式
   if (h == argmax_h_low) {
     if (w == argmax_w_low) {
       weight = (h + 1 - argmax_h) * (w + 1 - argmax_w);
@@ -184,6 +189,7 @@ __device__ DType get_coordinate_weight(
   if (argmax_w < 0)
     argmax_w = 0;
 
+  // 计算插值点的4个整数坐标
   int argmax_h_low = (int)argmax_h;
   int argmax_w_low = (int)argmax_w;
   int argmax_h_high;
@@ -200,8 +206,10 @@ __device__ DType get_coordinate_weight(
   } else {
     argmax_w_high = argmax_w_low + 1;
   }
+
   DType weight = 0;
 
+  // 宽的情况
   if (bp_dir == 0) {
     weight += -1 * (argmax_w_low + 1 - argmax_w) *
         im_data[argmax_h_low * data_width + argmax_w_low];
@@ -211,6 +219,7 @@ __device__ DType get_coordinate_weight(
         im_data[argmax_h_high * data_width + argmax_w_low];
     weight += (argmax_w - argmax_w_low) *
         im_data[argmax_h_high * data_width + argmax_w_high];
+  // 高的情况
   } else if (bp_dir == 1) {
     weight += -1 * (argmax_h_low + 1 - argmax_h) *
         im_data[argmax_h_low * data_width + argmax_w_low];
@@ -281,8 +290,10 @@ __global__ void deformable_im2col_gpu_kernel(
       for (int j = 0; j < kernel_w; ++j) {
 
         // 获得offset的索引
+        // channels上的顺序为(dh, dw) x 9
         const int data_offset_h_ptr =
             ((2 * (i * kernel_w + j)) * height_col + h_col) * width_col + w_col;
+        // dw比dh多了一个height_col x width_col
         const int data_offset_w_ptr =
             ((2 * (i * kernel_w + j) + 1) * height_col + h_col) * width_col +
             w_col;
@@ -293,7 +304,7 @@ __global__ void deformable_im2col_gpu_kernel(
 
         DType val = static_cast<DType>(0);
 
-        // 获得在输入图片中的位置
+        // 获得在输入图片中的位置，比传统卷积多了一个offset
         const DType h_im = h_in + i * dilation_h + offset_h;
         const DType w_im = w_in + j * dilation_w + offset_w;
 
@@ -302,10 +313,11 @@ __global__ void deformable_im2col_gpu_kernel(
           const DType map_h = i * dilation_h + offset_h;
           const DType map_w = j * dilation_w + offset_w;
 
-          // 坐标原点变换
+          // 转化为以(h_in, w_in)为原点的坐标
           const int cur_height = height - h_in;
           const int cur_width = width - w_in;
 
+          // 通过原始图片取值
           val = deformable_im2col_bilinear(
               data_im_ptr, width, cur_height, cur_width, map_h, map_w);
         }
@@ -400,18 +412,23 @@ __global__ void deformable_col2im_gpu_kernel(
     const int width_col,
     DType* grad_im) {
   CUDA_1D_KERNEL_LOOP(index, n) {
+    // 在卷积核中的坐标 3 x 3范围内
     const int j = (index / width_col / height_col) % kernel_w;
     const int i = (index / width_col / height_col / kernel_w) % kernel_h;
     const int c = index / width_col / height_col / kernel_w / kernel_h;
-    // compute the start and end of the output
 
+    // compute the start and end of the output
     const int deformable_group_index = c / channel_per_deformable_group;
 
+    // 输出图像的高和宽
     int w_out = index % width_col;
     int h_out = (index / width_col) % height_col;
+
+    // 输入图像中的高和宽
     int w_in = w_out * stride_w - pad_w;
     int h_in = h_out * stride_h - pad_h;
 
+    // 获取offset的值
     const DType* data_offset_ptr = data_offset +
         deformable_group_index * 2 * kernel_h * kernel_w * height_col *
             width_col;
@@ -421,18 +438,25 @@ __global__ void deformable_col2im_gpu_kernel(
         ((2 * (i * kernel_w + j) + 1) * height_col + h_out) * width_col + w_out;
     const DType offset_h = data_offset_ptr[data_offset_h_ptr];
     const DType offset_w = data_offset_ptr[data_offset_w_ptr];
+
+    // 插值点坐标
     const DType cur_inv_h_data = h_in + i * dilation_h + offset_h;
     const DType cur_inv_w_data = w_in + j * dilation_w + offset_w;
 
+    // 链式法则
     const DType cur_top_grad = data_col[index];
+
     const int cur_h = (int)cur_inv_h_data;
     const int cur_w = (int)cur_inv_w_data;
+
+    // 对应于4个插值点
     for (int dy = -2; dy <= 2; dy++) {
       for (int dx = -2; dx <= 2; dx++) {
         if (cur_h + dy >= 0 && cur_h + dy < height && cur_w + dx >= 0 &&
             cur_w + dx < width &&
             c10::cuda::compat::abs(cur_inv_h_data - (cur_h + dy)) < 1 &&
             c10::cuda::compat::abs(cur_inv_w_data - (cur_w + dx)) < 1) {
+          // 对应于输入图片中导数的位置
           int cur_bottom_grad_pos =
               (c * height + cur_h + dy) * width + cur_w + dx;
           DType weight = get_gradient_weight(
@@ -467,15 +491,20 @@ template <typename DType, typename Context>
 void DeformConvOpBase<DType, Context>::DeformableCol2im(
     const DType* data_col,
     const DType* data_offset,
-    at::IntList im_shape,
-    at::IntList col_shape,
-    DType* grad_im) {
+    at::IntList im_shape,  // X.dims()
+    at::IntList col_shape,  // col_buffer_shape
+    DType* grad_im) {  // 导数
   CAFFE_ENFORCE_EQ(pad_t(), pad_b());
   CAFFE_ENFORCE_EQ(pad_l(), pad_r());
   const int pad_h = pad_t();
   const int pad_w = pad_l();
+  // (input_c x input_h x input_w)
   index_t im_size = size_from_dim_(1, im_shape);
+
+  // C
   index_t channel_per_deformable_group = im_shape[1] / deformable_group_;
+
+  // 每个线程对应于一个col buffer中的元素
   index_t num_kernels = size_from_dim_(0, col_shape);
   // num_axes should be smaller than block size
   CHECK_LT(2, CAFFE_CUDA_NUM_THREADS);
@@ -534,38 +563,59 @@ __global__ void deformable_col2im_coord_gpu_kernel(
     const int width_col,
     DType* grad_offset) {
   CUDA_1D_KERNEL_LOOP(index, n) {
+    // 保存梯度值
     DType val = 0;
+
+    // 要计算梯度的像素在offset中的位置
     int w = index % width_col;
     int h = (index / width_col) % height_col;
     int c = index / width_col / height_col;
     // compute the start and end of the output
 
+    // 0
     const int deformable_group_index = c / (2 * kernel_h * kernel_w);
+
     const int col_step = kernel_h * kernel_w;
+
     int cnt = 0;
+
+    // col起始位置
     const DType* data_col_ptr = data_col +
         deformable_group_index * channel_per_deformable_group * width_col *
             height_col;
+
+    // im起始位置
     const DType* data_im_ptr = data_im +
         deformable_group_index * channel_per_deformable_group / kernel_h /
             kernel_w * height * width;
+    // offset起始位置
     const DType* data_offset_ptr = data_offset +
         deformable_group_index * 2 * kernel_h * kernel_w * height_col *
             width_col;
 
     const int offset_c = c - deformable_group_index * 2 * kernel_h * kernel_w;
 
+    // col_c遍历col buffer中的行
     for (int col_c = (offset_c / 2); col_c < channel_per_deformable_group;
          col_c += col_step) {
-      const int col_pos = ((col_c * height_col) + h) * width_col + w;
-      const int bp_dir = offset_c % 2;
 
+      // 对应于col buffer中的位置
+      const int col_pos = ((col_c * height_col) + h) * width_col + w;
+      const int bp_dir = offset_c % 2;  // 标记是height还是width
+
+      // 在一个卷积核中的坐标, 3 x 3
       int j = (col_pos / width_col / height_col) % kernel_w;
       int i = (col_pos / width_col / height_col / kernel_w) % kernel_h;
+
+      // col buffer中的宽高坐标
       int w_out = col_pos % width_col;
       int h_out = (col_pos / width_col) % height_col;
+
+      // input中的宽高坐标
       int w_in = w_out * stride_w - pad_w;
       int h_in = h_out * stride_h - pad_h;
+
+      // 提取offset的值
       const int data_offset_h_ptr =
           (((2 * (i * kernel_w + j)) * height_col + h_out) * width_col + w_out);
       const int data_offset_w_ptr =
@@ -573,6 +623,8 @@ __global__ void deformable_col2im_coord_gpu_kernel(
            w_out);
       const DType offset_h = data_offset_ptr[data_offset_h_ptr];
       const DType offset_w = data_offset_ptr[data_offset_w_ptr];
+
+      // 在输入图片中的位置
       DType inv_h = h_in + i * dilation_h + offset_h;
       DType inv_w = w_in + j * dilation_w + offset_w;
       if (inv_h < 0 || inv_w < 0 || inv_h >= height || inv_w >= width) {
@@ -583,9 +635,10 @@ __global__ void deformable_col2im_coord_gpu_kernel(
           inv_w,
           height,
           width,
-          data_im_ptr + cnt * height * width,
+          data_im_ptr + cnt * height * width,  // 处理不同的channel
           width,
           bp_dir);
+      // 链式法则
       val += weight * data_col_ptr[col_pos];
       cnt += 1;
     }
@@ -614,18 +667,24 @@ void DeformConvOpBase<DType, Context>::DeformableCol2imCoord(
     const DType* data_col,
     const DType* data_im,
     const DType* data_offset,
-    at::IntList im_shape,
-    at::IntList col_shape,
+    at::IntList im_shape,  // X.dims()
+    at::IntList col_shape,  // col_buffer_shape
     DType* grad_offset) {
+  // pad必须相同
   CAFFE_ENFORCE_EQ(pad_t(), pad_b());
   CAFFE_ENFORCE_EQ(pad_l(), pad_r());
+
   const int pad_h = pad_t();
   const int pad_w = pad_l();
+
+  // 使用多少个gpu线程进行并行计算, 对应于offset的每个位置
   index_t num_kernels = col_shape[1] * col_shape[2] * 2 * kernel_h() *
       kernel_w() * deformable_group_;
+
   index_t channel_per_deformable_group = col_shape[0] / deformable_group_;
   // num_axes should be smaller than block size
   CHECK_LT(2, CAFFE_CUDA_NUM_THREADS);
+
   // To avoid involving atomic operations, we will launch one kernel per
   // bottom dimension, and then in the kernel add up the top dimensions.
   // NOLINT_NEXT_LINE(whitespace/operators)
