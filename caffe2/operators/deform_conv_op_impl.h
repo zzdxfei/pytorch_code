@@ -125,7 +125,7 @@ bool DeformConvOp<T, Context>::RunOnDeviceWithOrderNCHW() {
   // offset为batch间的间隔
   const int input_offset = C / group_ * input_image_size;
   const int output_offset = M / group_ * output_image_size;
-  const int offset_offset = offset.numel() / offset.dim32(0);
+  const int offset_offset = offset.numel() / offset.dim32(0);  // N
   const int filter_offset = filter.size() / group_;
 
   // The col buffer is stored in CHW order as well - kernel_dim, and the height
@@ -296,7 +296,7 @@ bool DeformConvGradientOp<T, Context>::RunOnDeviceWithOrderNCHW() {
               stride_w() +
           1);
 
-  // 3 x 3
+  // kernel_h x kernel_w
   int kernel_dims_size = 1;
   for (int i = 0; i < kernel_.size(); ++i) {
     CAFFE_ENFORCE(filter.dim32(i + 2) == kernel_[i]);

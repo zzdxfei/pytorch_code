@@ -259,10 +259,14 @@ __global__ void deformable_im2col_gpu_kernel(
     DType* data_col) {
   CUDA_1D_KERNEL_LOOP(index, n) {
     // index index of output matrix
-    // 以转变矩阵为对象，每个线程处理kernel_h x kernel_w个位置
+    // 以转变矩阵为对象，每个线程处理kernel_h x kernel_w个位置，也就是一个卷积核
+    // 最开始的位置为卷积核左上角.
     const int w_col = index % width_col;  // 宽索引
     const int h_col = (index / width_col) % height_col;  // 高索引
+
     const int c_im = (index / width_col) / height_col;  // 通道索引
+
+    // 乘以中间的间隔kernel_h x kernel_w
     const int c_col = c_im * kernel_h * kernel_w;  // 要处理的开始位置
 
     // compute deformable group index
@@ -280,7 +284,7 @@ __global__ void deformable_im2col_gpu_kernel(
     // 卷积左上角对应的输入图片位置
     const DType* data_im_ptr = data_im + (c_im * height + h_in) * width + w_in;
 
-    // offset的坐标位置，如果这有1组，那么这里为起始位置
+    // offset的坐标位置
     const DType* data_offset_ptr = data_offset +
         deformable_group_index * 2 * kernel_h * kernel_w * height_col *
             width_col;
@@ -501,7 +505,6 @@ void DeformConvOpBase<DType, Context>::DeformableCol2im(
   // (input_c x input_h x input_w)
   index_t im_size = size_from_dim_(1, im_shape);
 
-  // C
   index_t channel_per_deformable_group = im_shape[1] / deformable_group_;
 
   // 每个线程对应于一个col buffer中的元素
@@ -572,7 +575,6 @@ __global__ void deformable_col2im_coord_gpu_kernel(
     int c = index / width_col / height_col;
     // compute the start and end of the output
 
-    // 0
     const int deformable_group_index = c / (2 * kernel_h * kernel_w);
 
     const int col_step = kernel_h * kernel_w;
@@ -593,17 +595,18 @@ __global__ void deformable_col2im_coord_gpu_kernel(
         deformable_group_index * 2 * kernel_h * kernel_w * height_col *
             width_col;
 
+    // 找到在该deform group中的坐标
     const int offset_c = c - deformable_group_index * 2 * kernel_h * kernel_w;
 
-    // col_c遍历col buffer中的行
+    // col_c遍历col buffer中的行, 2行代表一个坐标
     for (int col_c = (offset_c / 2); col_c < channel_per_deformable_group;
-         col_c += col_step) {
+         col_c += col_step) {  // + col_step对应于col buffer，该坐标参与多个通道
 
       // 对应于col buffer中的位置
       const int col_pos = ((col_c * height_col) + h) * width_col + w;
       const int bp_dir = offset_c % 2;  // 标记是height还是width
 
-      // 在一个卷积核中的坐标, 3 x 3
+      // 在一个卷积核中的坐标
       int j = (col_pos / width_col / height_col) % kernel_w;
       int i = (col_pos / width_col / height_col / kernel_w) % kernel_h;
 
